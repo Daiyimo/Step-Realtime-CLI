@@ -27,29 +27,53 @@ const commandToolSpec: ToolSpec = {
   }),
 };
 
-test("ToolPolicy denies encoded destructive shell commands", () => {
+function evaluateCommand(command: string) {
   const policy = new ToolPolicy({
     mode: "confirm",
     nonInteractiveApproval: "deny",
   });
 
-  const decision = policy.evaluate("run_command", "{}", commandToolSpec, {
-    command: "bash -c 'cm0gLXJmIC8= | base64 -d | sh'",
+  return policy.evaluate("run_command", "{}", commandToolSpec, {
+    command,
   });
+}
+
+test("ToolPolicy denies encoded destructive shell commands", () => {
+  const decision = evaluateCommand("bash -c 'cm0gLXJmIC8= | base64 -d | sh'");
+
+  assert.equal(decision.mode, "deny");
+  assert.match(decision.reason, /dangerous command/i);
+});
+
+test("ToolPolicy allows benign encoded text", () => {
+  const decision = evaluateCommand("echo SGVsbG8=");
+
+  assert.equal(decision.mode, "confirm");
+});
+
+test("ToolPolicy denies destructive rm paths", () => {
+  const decision = evaluateCommand("rm -rf /tmp/test");
+
+  assert.equal(decision.mode, "deny");
+  assert.match(decision.reason, /dangerous command/i);
+});
+
+test("ToolPolicy denies destructive find delete variants", () => {
+  const decision = evaluateCommand("find / -mindepth 1 -delete");
 
   assert.equal(decision.mode, "deny");
   assert.match(decision.reason, /dangerous command/i);
 });
 
 test("ToolPolicy denies destructive workspace wipe variants", () => {
-  const policy = new ToolPolicy({
-    mode: "confirm",
-    nonInteractiveApproval: "deny",
-  });
+  const decision = evaluateCommand("find . -mindepth 1 -delete");
 
-  const decision = policy.evaluate("run_command", "{}", commandToolSpec, {
-    command: "find . -mindepth 1 -delete",
-  });
+  assert.equal(decision.mode, "deny");
+  assert.match(decision.reason, /dangerous command/i);
+});
+
+test("ToolPolicy denies git clean forced delete variants", () => {
+  const decision = evaluateCommand("git clean -fdx");
 
   assert.equal(decision.mode, "deny");
   assert.match(decision.reason, /dangerous command/i);

@@ -18,8 +18,8 @@ export interface ToolPolicyConfig {
 }
 
 const DANGEROUS_COMMAND_PATTERNS: RegExp[] = [
-  /\brm\s+-(?:[^\s-]*r[^\s-]*f|[^\s-]*f[^\s-]*r)\s+(?:\/|~|\$HOME|\.)(?:\s|$)/i,
-  /\bfind\s+(?:\.|~|\$HOME|\/)(?:\s|$)[\s\S]*\s-delete(?:\s|$)/i,
+  /\brm\s+-(?:[^\s-]*r[^\s-]*f|[^\s-]*f[^\s-]*r)\s+(?:--\s+)?(?:\/(?:\S*)?|~(?:\/\S*)?|\$HOME(?:\/\S*)?|\.\.?(?:\/\S*)?)(?:\s|$)/i,
+  /\bfind\s+(?:\/(?:\S*)?|~(?:\/\S*)?|\$HOME(?:\/\S*)?|\.\.?(?:\/\S*)?)(?:\s|$)[\s\S]*\s-delete(?:\s|$)/i,
   /\bgit\s+clean\s+-[^\s]*f[^\s]*d/i,
   /\bshutdown\b/i,
   /\breboot\b/i,
@@ -186,7 +186,7 @@ function isDangerousCommand(command: string): boolean {
     try {
       const decoded = Buffer.from(candidate, "base64").toString("utf8").trim();
       return (
-        decoded.length > 0 &&
+        shouldInspectDecodedCommand(decoded) &&
         DANGEROUS_COMMAND_PATTERNS.some((pattern) => pattern.test(decoded))
       );
     } catch {
@@ -203,5 +203,20 @@ function shorten(text: string, maxChars: number): string {
 }
 
 function extractBase64Candidates(command: string): string[] {
-  return command.match(/[A-Za-z0-9+/]{8,}={0,2}/g) ?? [];
+  return command.match(/\b[A-Za-z0-9+/]{8,256}={0,2}\b/g) ?? [];
+}
+
+function shouldInspectDecodedCommand(decoded: string): boolean {
+  if (decoded.length < 4) {
+    return false;
+  }
+
+  if (!/^[\t\n\r\x20-\x7e]+$/.test(decoded)) {
+    return false;
+  }
+
+  return (
+    /[|;&`$()<>]/.test(decoded) ||
+    DANGEROUS_COMMAND_PATTERNS.some((pattern) => pattern.test(decoded))
+  );
 }
