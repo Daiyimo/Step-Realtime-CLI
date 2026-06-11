@@ -9,7 +9,7 @@ import {
   loadStepCliConfig,
   writeDefaultConfigTemplate,
   createDefaultConfigTemplate,
-} from "../bootstrap/config/loader.js";
+} from "./loader.js";
 
 describe("config loader", () => {
   let tempDir: string;

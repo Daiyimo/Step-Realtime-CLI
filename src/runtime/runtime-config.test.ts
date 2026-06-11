@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { resolveStepCliRuntimeConfig } from "../runtime/runtime-config.js";
+import { resolveStepCliRuntimeConfig } from "./runtime-config.js";
 
 // Mock model-limits to avoid network requests during tests.
 // resolveCachedModelTokenLimits probes the default API endpoint when no
