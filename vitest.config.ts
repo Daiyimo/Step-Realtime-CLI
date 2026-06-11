@@ -43,11 +43,30 @@ export default defineConfig({
       provider: "v8",
       reporter: ["text", "json", "html"],
       include: [
-        "src/**/*.ts",
-        "packages/**/src/**/*.ts",
-        "skills/**/src/**/*.ts",
+        "packages/utils/src/**/*.ts",
+        "packages/core/src/policy/**/*.ts",
+        "packages/core/src/tools/**/*.ts",
+        "packages/core/src/agent/agent-presets.ts",
+        "packages/core/src/agent/delegation-view.ts",
+        "packages/core/src/agent/harness-context.ts",
+        "packages/core/src/agent/state-machine.ts",
+        "packages/agent-sdk/src/**/*.ts",
+        "extensions/llm/src/**/*.ts",
+        "extensions/mcp/src/**/*.ts",
+        "skills/builtin/src/apply-patch.ts",
+        "skills/builtin/src/command-output.ts",
+        "src/bootstrap/config/loader.ts",
+        "src/bootstrap/config/defaults.ts",
+        "src/runtime/runtime-config.ts",
+        "src/runtime/runtime-utils.ts",
       ],
       exclude: ["**/*.test.ts", "**/*.spec.ts", "dist/**", "node_modules/**"],
+      thresholds: {
+        // Baseline thresholds for tested core modules.
+        // Raise incrementally as coverage expands to more files.
+        statements: 50,
+        branches: 60,
+      },
     },
   },
   resolve: {

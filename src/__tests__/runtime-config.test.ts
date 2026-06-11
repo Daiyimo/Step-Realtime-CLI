@@ -1,8 +1,22 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { resolveStepCliRuntimeConfig } from "../runtime/runtime-config.js";
+
+// Mock model-limits to avoid network requests during tests.
+// resolveCachedModelTokenLimits probes the default API endpoint when no
+// config/env is set, which hangs until AbortController timeout (5s).
+vi.mock("../bootstrap/config/model-limits.js", async (importOriginal) => {
+  const actual =
+    await importOriginal<
+      typeof import("../bootstrap/config/model-limits.js")
+    >();
+  return {
+    ...actual,
+    resolveCachedModelTokenLimits: vi.fn().mockResolvedValue(null),
+  };
+});
 
 describe("runtime config", () => {
   let tempDir: string;
