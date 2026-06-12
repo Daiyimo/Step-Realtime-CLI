@@ -248,6 +248,7 @@ export function createSubagentPlugin(
             createTaskWaitTool(backgroundManager),
             createTaskInterruptTool(backgroundManager),
             createTaskListTool(backgroundManager),
+            createAgentSwarmTool(backgroundManager),
           ]
         : [],
     hooks: {
@@ -773,6 +774,226 @@ function createTaskListTool(
       return manager.list(args.taskId, args.alias, args.group);
     },
   };
+}
+
+function createAgentSwarmTool(
+  manager: BackgroundSubtaskManager,
+): ToolSpec<AgentSwarmArgs> {
+  const MAX_SWARM_SUBAGENTS = 128;
+  const PROMPT_TEMPLATE_PLACEHOLDER = "{{item}}";
+
+  return {
+    definition: {
+      type: "function",
+      function: {
+        name: "AgentSwarm",
+        description:
+          "Launch parallel subagents for a swarm task. Use this in swarm mode when the task can be decomposed into independent branches.",
+        parameters: {
+          type: "object",
+          required: ["description", "prompt_template", "items"],
+          properties: {
+            description: {
+              type: "string",
+              description: "Short description for the whole swarm.",
+            },
+            prompt_template: {
+              type: "string",
+              description: `Prompt template for each subagent. Use ${PROMPT_TEMPLATE_PLACEHOLDER} as the item placeholder.`,
+            },
+            items: {
+              type: "array",
+              items: { type: "string" },
+              description: `Values to fill into prompt_template. Each item launches one subagent (max ${MAX_SWARM_SUBAGENTS}).`,
+            },
+          },
+        },
+      },
+    },
+    security: {
+      risk: "meta",
+      defaultMode: "allow",
+    },
+    parseArgs: (rawArgs) => {
+      const payload = parseJsonObject(rawArgs);
+      const description = readRequiredStringField(payload, "description");
+      const promptTemplate = readRequiredStringField(
+        payload,
+        "prompt_template",
+      );
+      const rawItems = payload.items;
+      if (
+        !Array.isArray(rawItems) ||
+        rawItems.length === 0 ||
+        rawItems.some((entry) => typeof entry !== "string")
+      ) {
+        throw new Error("items must be a non-empty string array");
+      }
+      const items = rawItems
+        .map((entry) => entry.trim())
+        .filter((entry) => entry.length > 0);
+      if (items.length < 2) {
+        throw new Error("AgentSwarm requires at least 2 items.");
+      }
+      if (items.length > 128) {
+        throw new Error("AgentSwarm supports at most 128 subagents.");
+      }
+      if (!promptTemplate.includes("{{item}}")) {
+        throw new Error(
+          "prompt_template must include the {{item}} placeholder.",
+        );
+      }
+
+      const seenPrompts = new Set<string>();
+      for (let i = 0; i < items.length; i++) {
+        const prompt = promptTemplate.split("{{item}}").join(items[i]);
+        if (seenPrompts.has(prompt)) {
+          throw new Error(
+            `Duplicate subagent prompt detected at item ${i + 1}. AgentSwarm requires distinct subagents.`,
+          );
+        }
+        seenPrompts.add(prompt);
+      }
+
+      return { description, prompt_template: promptTemplate, items };
+    },
+    inspect: ({ args }) => {
+      const text = `swarm ${args.items.length} subagent(s): ${args.description}`;
+      return {
+        inputHint: text,
+      };
+    },
+    execute: async (args, ctx): Promise<ToolExecutionResult> => {
+      const access = requireTopLevelHarness("AgentSwarm");
+      if (!access.ok) {
+        return access.result;
+      }
+
+      const taskIds: string[] = [];
+      for (let i = 0; i < args.items.length; i++) {
+        const item = args.items[i];
+        const prompt = args.prompt_template.split("{{item}}").join(item);
+        const label = `${args.description} #${i + 1}`;
+
+        const startResult = await manager.start(
+          {
+            prompt,
+            description: label,
+          },
+          ctx.workspaceRoot,
+          access.parent,
+        );
+
+        if (!startResult.ok) {
+          return {
+            ok: true,
+            summary: `Swarm failed to start subagent #${i + 1}`,
+            content: startResult.summary ?? "Failed to start subagent",
+          };
+        }
+
+        const taskId = (
+          startResult.data as { task?: { id?: string } } | undefined
+        )?.task?.id;
+        if (!taskId) {
+          return {
+            ok: true,
+            summary: "Swarm missing task id after start",
+            content: "Missing task id after start",
+          };
+        }
+        taskIds.push(taskId);
+      }
+
+      const results = await Promise.all(
+        taskIds.map(async (taskId, index) => {
+          const waitResult = await manager.wait({
+            taskId,
+            waitFor: "all",
+            waitMs: 60_000,
+            signal: ctx.signal,
+          });
+
+          const taskView = (
+            waitResult.data as
+              | {
+                  task?: {
+                    status?: string;
+                    lastSummary?: string;
+                    lastError?: string;
+                  };
+                }
+              | undefined
+          )?.task;
+          let status: "completed" | "failed" | "aborted" = "completed";
+          let output = `Subagent ${taskId} finished`;
+
+          if (taskView) {
+            if (taskView.status === "error") {
+              status = "failed";
+              output = taskView.lastError ?? taskView.lastSummary ?? output;
+            } else if (taskView.status === "interrupted") {
+              status = "aborted";
+              output = taskView.lastSummary ?? output;
+            } else {
+              output = taskView.lastSummary ?? output;
+            }
+          } else {
+            output = waitResult.summary ?? output;
+          }
+
+          return {
+            index: index + 1,
+            item: args.items[index],
+            status,
+            output,
+          };
+        }),
+      );
+
+      return {
+        ok: true,
+        summary: `Swarm completed: ${results.length} subagent(s)`,
+        content: renderSwarmResults(results),
+      };
+    },
+  };
+}
+
+interface AgentSwarmArgs {
+  description: string;
+  prompt_template: string;
+  items: string[];
+}
+
+function renderSwarmResults(
+  results: Array<{
+    index: number;
+    item: string;
+    status: string;
+    output: string;
+  }>,
+): string {
+  const completed = results.filter((r) => r.status === "completed").length;
+  const lines = [
+    "<agent_swarm_result>",
+    `<summary>completed: ${completed}, failed: ${results.length - completed}</summary>`,
+  ];
+  for (const result of results) {
+    lines.push(
+      `<subagent item="${escapeXml(result.item)}" outcome="${result.status}">${escapeXml(result.output)}</subagent>`,
+    );
+  }
+  lines.push("</agent_swarm_result>");
+  return lines.join("\n");
+}
+
+function escapeXml(value: string): string {
+  return value
+    .replaceAll("&", "&amp;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;");
 }
 
 class BackgroundSubtaskManager {
