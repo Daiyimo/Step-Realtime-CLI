@@ -1,7 +1,13 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, afterEach } from "vitest";
 import { createSwarmPlugin, getSwarmMode } from "./swarm-plugin.js";
 
+function resetSwarmMode(): void {
+  const mode = getSwarmMode();
+  mode.exit();
+}
+
 describe("createSwarmPlugin", () => {
+  afterEach(resetSwarmMode);
   it("starts inactive", () => {
     const plugin = createSwarmPlugin();
     expect(plugin.getSwarmMode().isActive).toBe(false);
@@ -115,6 +121,8 @@ describe("createSwarmPlugin", () => {
 });
 
 describe("getSwarmMode", () => {
+  afterEach(resetSwarmMode);
+
   it("returns the shared swarm mode state", () => {
     const mode = getSwarmMode();
     expect(mode.isActive).toBe(false);

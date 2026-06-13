@@ -38,6 +38,7 @@ import { toErrorMessage } from "@step-cli/utils/error.js";
 import { clamp } from "@step-cli/utils/math.js";
 import { shortenLine, truncateText } from "@step-cli/utils/text.js";
 import type { MutableRef } from "@step-cli/utils/mutable-ref.js";
+import { createLogger } from "@step-cli/core/logging/logger.js";
 import { isTopLevelMainHarness } from "@step-cli/core/plugins/tool-visibility.js";
 import type {
   PluginHookContext,
@@ -176,6 +177,10 @@ const MAIN_ORCHESTRATION_REMINDER = [
   "- Use task only for blocking one-shot delegation. Use task_start for finite background work and spawn_teammate for longer-lived collaborators.",
   "- Prefer isolate_workspace=true when parallel branches may edit overlapping files.",
 ].join("\n");
+
+const SUBAGENT_PLUGIN_LOGGER = createLogger({
+  baseFields: { component: "subagent-plugin" },
+});
 
 const DEFAULT_WAIT_MS = 5_000;
 const MAX_WAIT_MS = 60_000;
@@ -782,6 +787,7 @@ function createAgentSwarmTool(
 ): ToolSpec<AgentSwarmArgs> {
   const MAX_SWARM_SUBAGENTS = 128;
   const PROMPT_TEMPLATE_PLACEHOLDER = "{{item}}";
+  const DEFAULT_SWARM_WAIT_MS = 60_000;
 
   return {
     definition: {
@@ -811,6 +817,33 @@ function createAgentSwarmTool(
               type: "string",
               description:
                 "Optional model override for all subagents in this swarm. Falls back to the main model when omitted.",
+            },
+            subagent_context_mode: {
+              type: "string",
+              enum: ["inherit", "fresh"],
+              description:
+                "How much parent context to hand off to subagents. Defaults to 'inherit'; use 'fresh' to start without the parent's conversation snapshot.",
+            },
+            subagent_preset: {
+              type: "string",
+              description:
+                "Optional preset applied to all swarm subagents (e.g. review, planner, explore).",
+            },
+            isolate_workspace: {
+              type: "boolean",
+              description:
+                "Create or reuse dedicated git worktrees for swarm subagents. Recommended when concurrent writers may touch overlapping files.",
+            },
+            subagent_worktree_name: {
+              type: "string",
+              description:
+                "Optional shared worktree lane name for all swarm subagents. Only applies when isolate_workspace is true.",
+            },
+            wait_ms: {
+              type: "integer",
+              minimum: 0,
+              maximum: MAX_WAIT_MS,
+              description: `Maximum time to wait for all subagents in milliseconds. Defaults to ${DEFAULT_SWARM_WAIT_MS}.`,
             },
           },
         },
@@ -861,7 +894,25 @@ function createAgentSwarmTool(
         seenPrompts.add(prompt);
       }
 
-      return { description, prompt_template: promptTemplate, items };
+      return {
+        description,
+        prompt_template: promptTemplate,
+        items,
+        subagent_model: readStringField(payload.subagent_model),
+        subagent_context_mode: parseTaskContextMode(
+          payload.subagent_context_mode,
+          "subagent_context_mode",
+        ),
+        subagent_preset: readStringField(payload.subagent_preset),
+        isolate_workspace: readBooleanField(
+          payload.isolate_workspace,
+          "isolate_workspace",
+        ),
+        subagent_worktree_name:
+          readStringField(payload.subagent_worktree_name) ??
+          readStringField(payload.subagentWorktreeName),
+        wait_ms: readIntegerField(payload.wait_ms ?? payload.waitMs, "wait_ms"),
+      };
     },
     inspect: ({ args }) => {
       const text = `swarm ${args.items.length} subagent(s): ${args.description}`;
@@ -875,6 +926,12 @@ function createAgentSwarmTool(
         return access.result;
       }
 
+      const waitMs = clamp(
+        args.wait_ms ?? DEFAULT_SWARM_WAIT_MS,
+        0,
+        MAX_WAIT_MS,
+      );
+
       const taskIds: string[] = [];
       for (let i = 0; i < args.items.length; i++) {
         const item = args.items[i];
@@ -886,6 +943,10 @@ function createAgentSwarmTool(
             prompt,
             description: label,
             model: args.subagent_model,
+            preset: args.subagent_preset,
+            contextMode: args.subagent_context_mode,
+            isolateWorkspace: args.isolate_workspace,
+            worktreeName: args.subagent_worktree_name,
           },
           ctx.workspaceRoot,
           access.parent,
@@ -917,7 +978,7 @@ function createAgentSwarmTool(
           const waitResult = await manager.wait({
             taskId,
             waitFor: "all",
-            waitMs: 60_000,
+            waitMs,
             signal: ctx.signal,
           });
 
@@ -972,13 +1033,18 @@ interface AgentSwarmArgs {
   prompt_template: string;
   items: string[];
   subagent_model?: string;
+  subagent_context_mode?: "inherit" | "fresh";
+  subagent_preset?: string;
+  isolate_workspace?: boolean;
+  subagent_worktree_name?: string;
+  wait_ms?: number;
 }
 
 function renderSwarmResults(
   results: Array<{
     index: number;
     item: string;
-    status: string;
+    status: "completed" | "failed" | "aborted";
     output: string;
   }>,
 ): string {
@@ -1000,6 +1066,7 @@ function escapeXml(value: string): string {
   return value
     .replaceAll("&", "&amp;")
     .replaceAll('"', "&quot;")
+    .replaceAll("'", "&apos;")
     .replaceAll("<", "&lt;")
     .replaceAll(">", "&gt;");
 }
@@ -2835,8 +2902,12 @@ function readTaskWaitMode(
 function safeFinalize(harness: AgentHarness): void {
   try {
     harness.finalize();
-  } catch {
-    // Best-effort cleanup only.
+  } catch (error) {
+    SUBAGENT_PLUGIN_LOGGER.warn(
+      "subagent_finalize_failed",
+      { error: toErrorMessage(error) },
+      "subagent harness finalize failed; best-effort cleanup only.",
+    );
   }
 }
 
