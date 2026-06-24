@@ -1,4 +1,7 @@
 import { Command } from "commander";
+import { spawn, spawnSync } from "node:child_process";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   configureCommanderProgram,
   parseCommanderProgram,
@@ -91,6 +94,66 @@ export async function runRootCommand(argv: string[]): Promise<void> {
           interactionSurface: shouldUseTui ? "interactive" : undefined,
         });
         if (shouldUseTui) {
+          // @opentui/core is a Bun-only bundle: it statically imports from
+          // "bun:ffi" which Node's ESM loader cannot resolve (ERR_UNSUPPORTED_ESM_URL_SCHEME).
+          // The TUI must therefore run under Bun. Non-TUI paths (exec/serve/help/...)
+          // are unaffected and continue to run under Node. When already in a Bun
+          // process (process.versions.bun is defined) we proceed in-process;
+          // otherwise we respawn ourselves under Bun, inheriting stdio so the
+          // child re-acquires the TTY. No config/IPC hand-off is needed — the
+          // child re-parses argv and re-resolves the runtime config from scratch.
+          if (typeof process.versions.bun === "undefined") {
+            const bunProbe = spawnSync("bun", ["--version"], {
+              stdio: "ignore",
+            });
+            if (bunProbe.error || bunProbe.status !== 0) {
+              process.stderr.write(
+                "step-cli: TUI requires the Bun runtime (@opentui/core uses bun:ffi, unsupported by Node). " +
+                  "Install Bun from https://bun.sh then retry.\n",
+              );
+              process.exitCode = 1;
+              return;
+            }
+
+            const entryScriptPath =
+              process.argv[1] ??
+              path.join(
+                path.resolve(
+                  path.dirname(fileURLToPath(import.meta.url)),
+                  "..",
+                ),
+                "bin",
+                "step-cli.js",
+              );
+
+            await new Promise<void>((resolve) => {
+              const child = spawn(
+                "bun",
+                [entryScriptPath, ...process.argv.slice(2)],
+                {
+                  stdio: "inherit",
+                  env: process.env,
+                },
+              );
+              child.once("error", () => {
+                process.exitCode = 1;
+                resolve();
+              });
+              child.once("exit", (code, signal) => {
+                if (signal) {
+                  try {
+                    process.kill(process.pid, signal);
+                  } catch {
+                    /* signal forwarding best-effort */
+                  }
+                }
+                process.exitCode = code ?? 1;
+                resolve();
+              });
+            });
+            return;
+          }
+
           const createLocalTuiClientApp =
             await loadOpenTuiClientAppFactoryAtRuntime();
           const app = await createLocalTuiClientApp(stepCliConfig);

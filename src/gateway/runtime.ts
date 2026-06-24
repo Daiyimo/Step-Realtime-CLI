@@ -151,6 +151,7 @@ import type {
   ToolSearchIndexProfile,
   ToolSpec,
   StepCliInteractionProfile,
+  StepCliSlashCommandResult,
   StepCliVerifierVerdict,
   UserClarificationRuntimeState,
   UserClarificationRequest,
@@ -1715,6 +1716,56 @@ export class StepCli {
     }
 
     this.uiState.tui = null;
+  }
+
+  /**
+   * Execute a slash command from an external caller (e.g. the OpenTUI client).
+   *
+   * This wraps the private executeSlashCommand so that the TUI — which
+   * intercepts all "/" input locally — can forward gateway-level commands
+   * (such as /swarm, /clear, /history) to the runtime. For /swarm <task>,
+   * the task text is returned instead of starting a turn directly, so the
+   * caller can submit it through the session service's turn queue.
+   */
+  async executeSlashCommandExternal(
+    commandLine: string,
+  ): Promise<StepCliSlashCommandResult> {
+    const parsed = parseSlashCommandLine(commandLine);
+    if (!parsed) {
+      return { handled: false, message: null, taskText: null };
+    }
+
+    // For /swarm, handle specially to capture taskText without starting a
+    // turn directly. The caller (TUI) submits the task via sdk.runPrompt
+    // to ensure proper queueing through the session service.
+    if (parsed.normalizedCommand === "/swarm") {
+      const swarmResult = this.handleSwarmCommand(parsed.rest);
+      const tui = this.uiState.tui;
+      if (tui && swarmResult.tuiMessage) {
+        tui.addEvent(
+          "swarm",
+          swarmResult.tuiMessage,
+          (swarmResult.tuiTone ?? "accent") as StepCliInteractiveUiTone,
+        );
+      }
+      return {
+        handled: true,
+        message: swarmResult.message,
+        taskText: swarmResult.taskText ?? null,
+      };
+    }
+
+    // For all other commands, delegate to the existing executeSlashCommand.
+    const tui = this.uiState.tui;
+    const surface: SlashCommandSurfaceInput = tui
+      ? { kind: "tui", tui }
+      : { kind: "repl", json: false };
+    const result = await this.executeSlashCommand(parsed, surface);
+    return {
+      handled: result === "handled",
+      message: null,
+      taskText: null,
+    };
   }
 
   async runTurn(
